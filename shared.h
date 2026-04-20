@@ -32,12 +32,11 @@ typedef enum {
 bool is_l1(int cycles);
 bool is_l2(int cycles);
 void sleep(int cycles);
-int rand_range(int min, int max);
 
 void set_attack(volatile uint8_t* buf, int set);
 
 bool set_is_attacked(volatile uint8_t* buf, int set);
-bool set_is_attacked2(volatile uint8_t* buf, int set1, int set2);
+int set_is_attacked2(volatile uint8_t* buf, int set1, int set2);
 
 bool set_attack_and_probe(volatile uint8_t* buf, int attack_set, int probe_set);
 bool set_attack_and_probe2(volatile uint8_t* buf, int attack_set1, int attack_set2, int probe_set);

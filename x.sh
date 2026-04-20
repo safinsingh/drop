@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS='-O0'
+CFLAGS='-O0 -Wall -Werror'
 SHARED_SRC='util.c shared.c'
 SENDER_SRC='sender.c'
 RECEIVER_SRC='receiver.c'
