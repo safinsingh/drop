@@ -2,24 +2,44 @@
 #include "util.h"
 #include "shared.h"
 
-#define SET_PRESSURE 1000
-#define NUM_EVICTORS 128
-#define RETRIES 5000
+typedef enum {
+    STATE_IDLE,
+    STATE_REQ_HI,
+    STATE_REQ_LO
+} sender_state_t;
 
 static volatile uint8_t buf[SET_STRIDE * NUM_EVICTORS] __attribute__((aligned(SET_STRIDE)));
 
-// set in [0, 64]
-static inline void prime_set(int set) {
-    for (int i = 0; i < SET_PRESSURE; i++) {
-        buf[set * LINE_SIZE + rand_range(1, NUM_EVICTORS - 1) * SET_STRIDE] = 0;
-    }
-}
+uint8_t message = 0b10101010;
 
 int main() {
     srand(time(NULL));
-    CYCLES c1 = 0, c2 = 0;
+    sender_state_t state = STATE_IDLE;
+
+    int bit;
+    int index = 0;
+
+    puts("IDLING");
 
     for (;;) {
-        prime_set(0);
+        switch (state) {
+            case STATE_IDLE:
+                if (index++ == 8) goto done;
+                puts("IDLING->REQHI");
+                state = STATE_REQ_HI;
+                break;
+
+            case STATE_REQ_HI:
+                bit = ((message >> index) & 0b1) ? DATA_1 : DATA_0;
+                if (set_attack_and_probe2(buf, REQ, bit, ACK)) { puts("REQHI->REQLO"); state = STATE_REQ_LO; }
+                break;
+            
+            case STATE_REQ_LO:
+                if (!set_is_attacked(buf, ACK)) { puts("REQLO->IDLING"); state = STATE_IDLE; }
+                break;
+        }
     }
+
+done:
+    puts("done");
 }
