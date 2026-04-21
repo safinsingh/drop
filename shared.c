@@ -79,3 +79,15 @@ bool set_attack_and_probe2(volatile uint8_t* buf, int attack_set1, int attack_se
     }
     return hits > BURST_REPETITIONS / 2;
 }
+
+int get_nth_bit(char* buf, int n) {
+    int byte = n / 8;
+    int bit = n - (byte * 8);
+    return (buf[byte] >> bit) & 0b1;
+}
+
+void set_nth_bit(char* buf, int n, int value) {
+    int byte = n / 8;
+    int bit = n - (byte * 8);
+    buf[byte] |= value << bit;
+}

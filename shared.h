@@ -20,6 +20,12 @@
 #define FENCE do { __asm__ __volatile__ ("lfence" ::: "memory"); } while (0);
 #define NUM_EVICTORS 300
 
+#ifdef DEBUG
+    #define debug_print(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+#else
+    #define debug_print(fmt, ...)
+#endif
+
 // wire <=> cache set primed
 typedef enum {
     // Sender -> Receiver
@@ -40,5 +46,8 @@ int set_is_attacked2(volatile uint8_t* buf, int set1, int set2);
 
 bool set_attack_and_probe(volatile uint8_t* buf, int attack_set, int probe_set);
 bool set_attack_and_probe2(volatile uint8_t* buf, int attack_set1, int attack_set2, int probe_set);
+
+int get_nth_bit(char* buf, int n);
+void set_nth_bit(char* buf, int n, int value);
 
 #endif
