@@ -15,10 +15,14 @@
 #define KIB 1024
 #define L1_SIZE 32 * KIB
 #define L1_WAYS 8
+#define L1_SETS 64
 #define LINE_SIZE 64
 #define SET_STRIDE (L1_SIZE / L1_WAYS)
-#define FENCE do { __asm__ __volatile__ ("lfence" ::: "memory"); } while (0);
 #define NUM_EVICTORS 300
+#define BYTES_PER_PACKET 7
+#define MSG_LEN 518 // 7 | 518
+#define BIT(x) (1 << x)
+#define TODO 0
 
 #ifdef DEBUG
     #define debug_print(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
@@ -26,28 +30,23 @@
     #define debug_print(fmt, ...)
 #endif
 
-// wire <=> cache set primed
+// wire (=== cache set) mapping:
+// 0:1   = REQ, ACQ (for 4-phase handshake)
+// 2:57  = 7 bytes of data
+// 57:63 = unused
+#define DATA_MASK 0x00FFFFFFFFFFFFFFULL
+typedef uint64_t mask_t;
 typedef enum {
-    // Sender -> Receiver
-    REQ,
-    ACK,
-    DATA_0,
-    DATA_1
+    REQ = 0,
+    ACK
 } msg_t;
 
 bool is_l1(int cycles);
 bool is_l2(int cycles);
 void sleep(int cycles);
 
-void set_attack(volatile uint8_t* buf, int set);
-
-bool set_is_attacked(volatile uint8_t* buf, int set);
-int set_is_attacked2(volatile uint8_t* buf, int set1, int set2);
-
-bool set_attack_and_probe(volatile uint8_t* buf, int attack_set, int probe_set);
-bool set_attack_and_probe2(volatile uint8_t* buf, int attack_set1, int attack_set2, int probe_set);
-
-int get_nth_bit(char* buf, int n);
-void set_nth_bit(char* buf, int n, int value);
+bool is_attacked(volatile uint8_t* buf, int set);
+mask_t which_attacked(volatile uint8_t* buf);
+bool attack_and_probe(volatile uint8_t* buf, mask_t attack_sets, int probe_set);
 
 #endif
