@@ -23,10 +23,11 @@
 #define MSG_LEN 1029 // 7 | 1029
 #define BIT(x) ((uint64_t)1 << (x))
 #define TEST_BIT(x, b) (((x) >> (b)) & 0b1)
+#define DATA_PACKET(x) ((x << 2) | BIT(REQ))
 #define TODO 0
 
 #define TEST_CONST 0b1011101101001110101010111100100UL
-#define TEST_CONST2 0xFFFFFFFFFFFFFFFFUL
+#define TEST_CONST2 0b0000000001111000011110010110000101111010011110010111011101111001UL
 
 #ifdef DEBUG
     #define debug_print(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)

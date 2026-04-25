@@ -17,7 +17,7 @@ int main() {
         clock_t begin = clock();
         for (int i = 0; i < len; i += BYTES_PER_PACKET) {
             uint64_t data = *((uint64_t*)(msg + i)) & DATA_MASK;
-            while (!attack_and_probe(buf, (data << 2) | BIT(REQ), ACK));
+            while (!attack_and_probe(buf, DATA_PACKET(data), ACK));
             // deassert REQ & wait for receiver to drop ACK
             while (is_attacked(buf, ACK));
         }

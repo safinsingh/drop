@@ -5,7 +5,8 @@ static volatile uint8_t buf[SET_STRIDE * NUM_EVICTORS] __attribute__((aligned(SE
 
 int main() {
     for (;;) {
-        attack_and_probe(buf, TEST_CONST2, 0);
+        while (!attack_and_probe(buf, DATA_PACKET(TEST_CONST2), ACK));
+        while (is_attacked(buf, ACK));
         // printf("hi!: %d\n", line0);
     }
 }

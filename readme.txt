@@ -3,6 +3,6 @@
 unidirectional chat app built on an L1 prime+probe side-channel
 no syscalls (besides write for printf); hardware prefetcher enabled
 implemented, tested, and tuned on an i7-8550u asus ux430unr
-achieves ~90byte/sec throughput and ~100% accuracy!
+achieves ~600byte/sec throughput and ~100% accuracy!
 
 inspired by chris fletcher's dead drop lab (https://cwfletcher.github.io/teaching/)
