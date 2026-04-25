@@ -1,13 +1,14 @@
 #include <immintrin.h>
+#include <popcntintrin.h>
 #include <stdbool.h>
 #include "util.h"
 #include "shared.h"
+#include <syscall.h>
+#include <unistd.h>
 
-// hand-tuned constants; ~accurate when other thread is busy-priming set
-#define UNI_PROBE_ROUNDS 4000
-#define WHICH_ROUNDS 5000
-#define AP_ROUNDS 4000
-#define PROBE_SLEEP 4000
+// each function contains hand-tuned constants; ~accurate when other thread is busy-priming set
+// note that these constants must be tuned per-device. this was tested on:
+// asus ux430unr, i7-8550u, plugged in
 
 // Rough (observed) latencies:
 // L1: ~20 (0-30)
@@ -15,39 +16,63 @@
 bool is_l1(int cycles) { return cycles < 30; }
 bool is_l2(int cycles) { return !is_l1(cycles); }
 
-void sleep(int cycles) {
+void spin(int cycles) {
     // TODO: replace with blocking I/O
-    for (int i = 0; i < cycles; i++);
+    for (int i = 0; i < cycles; i++) _mm_pause();
+}
+
+// IN UR FACE DCU-IP PREFETCHER!!!
+static inline int rand_line_offset() {
+    return rand() % (LINE_SIZE - 1);
 }
 
 // buf must be  aligned to SET_STRIDE
 //              of a size === 0 (mod SET_STRIDE)
 bool is_attacked(volatile uint8_t* buf, int set) {
-    int hits = 0;
-    for (int i = 0; i < UNI_PROBE_ROUNDS; i++) {
-        buf[set * LINE_SIZE] = 0;
-        sleep(PROBE_SLEEP);
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[set * LINE_SIZE]));
-        if (is_l2(t)) hits++;
+    int misses = 0;
+    for (int i = 0; i < 50; i++) {
+        buf[set * LINE_SIZE + rand_line_offset()] = 0;
+        spin(400); // ~ 1/popcount(attack bits!) we go with worst-case.
+        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[set * LINE_SIZE + rand_line_offset()]));
+        if (is_l2(t)) misses++;
     }
-    return hits > UNI_PROBE_ROUNDS / 2;
+    return misses > 30;
 }
 
 mask_t which_attacked(volatile uint8_t* buf) {
-    uint64_t hits[L1_SETS] = {0};
-    for (int i = 0; i < WHICH_ROUNDS; i++) {
-        for (int j = 0; j < L1_SETS; j++) {
-            buf[j * LINE_SIZE] = 0;
-        }
-        sleep(TODO);
-        for (int j = 0; j < L1_SETS; j++) {
-            CYCLES t = measure_one_block_access_time((uint64_t)(&buf[j * LINE_SIZE]));
-            if (is_l2(t)) hits[j]++;
+    int misses[L1_SETS] = {0};
+    for (int j = 0; j < L1_SETS; j++) {
+        for (int i = 0; i < 50; i++) {
+            buf[j * LINE_SIZE + rand_line_offset()] = 0;
+            spin(500);
+            CYCLES t = measure_one_block_access_time((uint64_t)(&buf[j * LINE_SIZE + rand_line_offset()]));
+            if (is_l2(t)) misses[j]++;
         }
     }
+
+    #ifdef DEBUG
+    uint64_t avg_attacked_misses = 0;
+    uint64_t avg_relaxed_misses  = 0;
+    uint8_t popcnt = _mm_popcnt_u64(TEST_CONST);
+    for (int i = 0; i < L1_SETS; i++) {
+        if (TEST_BIT(TEST_CONST, i)) avg_attacked_misses += misses[i];
+        else avg_relaxed_misses += misses[i];
+    }
+    avg_attacked_misses /= popcnt; avg_relaxed_misses /= (64 - popcnt);
+    printf("avg attacked #misses: %lu\n", avg_attacked_misses);
+    printf("avg passive  #misses: %lu\n", avg_relaxed_misses);
+    #endif
+    
     uint64_t ret = 0;
     for (int i = 0; i < L1_SETS; i++) {
-        ret |= (hits[i] > WHICH_ROUNDS / 2) << i;
+        uint64_t cond = misses[i] > 35;
+
+        // missed thresh
+        #ifdef DEBUG
+        if (cond ^ TEST_BIT(TEST_CONST, i)) printf("misses[%d] = %d\n", i, misses[i]);
+        #endif
+
+        ret |= cond << i;
     }
     return ret;
 }
@@ -55,11 +80,11 @@ mask_t which_attacked(volatile uint8_t* buf) {
 // fused probe/attack to sustain pressure
 bool attack_and_probe(volatile uint8_t* buf, mask_t attack_sets, int probe_set) {
     int num_attacked = _mm_popcnt_u64(attack_sets);
-    int evictors = PROBE_SLEEP / num_attacked; // per set, per round
-    int hits = 0;
+    int evictors = 4000 / num_attacked; // per set, per round
+    int misses = 0;
 
-    for (int i = 0; i < AP_ROUNDS; i++) {
-        buf[probe_set * LINE_SIZE] = 0;
+    for (int i = 0; i < 50; i++) {
+        buf[probe_set * LINE_SIZE + rand_line_offset()] = 0;
 
         for (int j = 0; j < evictors; j++) {
             for (int k = 0; k < 64; k++) {
@@ -71,8 +96,19 @@ bool attack_and_probe(volatile uint8_t* buf, mask_t attack_sets, int probe_set) 
             }
         }
         
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[probe_set * LINE_SIZE]));
-        if (is_l2(t)) hits++;
+        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[probe_set * LINE_SIZE + rand_line_offset()]));
+        if (is_l2(t)) misses++;
     }
-    return hits > AP_ROUNDS / 2;
+    return misses > 30;
+}
+
+void print_binary64(uint64_t n) {
+    for (int i = 63; i >= 0; i--) {
+        uint64_t mask = (uint64_t)1 << i;
+        if (n & mask) {
+            putchar('1');
+        } else {
+            putchar('0');
+        }
+    }
 }

@@ -21,8 +21,12 @@
 #define NUM_EVICTORS 300
 #define BYTES_PER_PACKET 7
 #define MSG_LEN 518 // 7 | 518
-#define BIT(x) (1 << x)
+#define BIT(x) ((uint64_t)1 << (x))
+#define TEST_BIT(x, b) (((x) >> (b)) & 0b1)
 #define TODO 0
+
+#define TEST_CONST 0b1011101101001110101010111100100UL
+#define TEST_CONST2 0xFFFFFFFFFFFFFFFFUL
 
 #ifdef DEBUG
     #define debug_print(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
@@ -43,7 +47,8 @@ typedef enum {
 
 bool is_l1(int cycles);
 bool is_l2(int cycles);
-void sleep(int cycles);
+void spin(int cycles);
+void print_binary64(uint64_t n);
 
 bool is_attacked(volatile uint8_t* buf, int set);
 mask_t which_attacked(volatile uint8_t* buf);
