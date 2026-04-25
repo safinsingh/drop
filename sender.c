@@ -11,15 +11,15 @@ static uint8_t msg[MSG_LEN] = {0};
 int main() {
     for (;;) {
         printf("> ");
-        fgets((char*)msg, sizeof(msg), stdin);
+        if (fgets((char*)msg, sizeof(msg), stdin) == NULL) continue;
         int len = strlen((char*)msg) + 1; // send null-terminator
 
         clock_t begin = clock();
         for (int i = 0; i < len; i += BYTES_PER_PACKET) {
             uint64_t data = *((uint64_t*)(msg + i)) & DATA_MASK;
             while (!attack_and_probe(buf, (data << 2) | BIT(REQ), ACK));
-            spin(100); // receiver must see that REQ has been deasserted
-            while (is_attacked(buf, ACK)); // wait for receiver to drop ACK
+            // deassert REQ & wait for receiver to drop ACK
+            while (is_attacked(buf, ACK));
         }
         clock_t end = clock();
         double time = (double)(end - begin) / CLOCKS_PER_SEC;

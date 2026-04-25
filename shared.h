@@ -20,7 +20,7 @@
 #define SET_STRIDE (L1_SIZE / L1_WAYS)
 #define NUM_EVICTORS 300
 #define BYTES_PER_PACKET 7
-#define MSG_LEN 518 // 7 | 518
+#define MSG_LEN 1029 // 7 | 1029
 #define BIT(x) ((uint64_t)1 << (x))
 #define TEST_BIT(x, b) (((x) >> (b)) & 0b1)
 #define TODO 0
@@ -45,8 +45,22 @@ typedef enum {
     ACK
 } msg_t;
 
-bool is_l1(int cycles);
-bool is_l2(int cycles);
+// Rough (observed) latencies:
+// L1: ~20 (0-30)
+// L2: ~40 (30+)
+inline bool is_l1(int cycles) { return cycles < 30; }
+inline bool is_l2(int cycles) { return !is_l1(cycles); }
+
+// IN UR FACE DCU-IP PREFETCHER!!!
+static inline int rand_line_offset() {
+    // xorshift32 PRNG to avoid glibc rand() polluting the L1 data cache
+    static uint32_t state = 4242424242;
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state % (LINE_SIZE - 1);
+}
+
 void spin(int cycles);
 void print_binary64(uint64_t n);
 

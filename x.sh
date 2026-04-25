@@ -1,7 +1,7 @@
 if [ ${2:-''} == 'unit' ]; then UNITS_PREFIX="units"; else UNITS_PREFIX="."; fi
 
 CC=gcc
-CFLAGS='-O0 -Wall -Werror -march=native'
+CFLAGS='-O1 -Wall -Werror -march=native'
 SHARED_SRC='util.c shared.c'
 SENDER_SRC="$UNITS_PREFIX/sender.c"
 RECEIVER_SRC="$UNITS_PREFIX/receiver.c"

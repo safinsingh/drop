@@ -10,20 +10,9 @@
 // note that these constants must be tuned per-device. this was tested on:
 // asus ux430unr, i7-8550u, plugged in
 
-// Rough (observed) latencies:
-// L1: ~20 (0-30)
-// L2: ~40 (30+)
-bool is_l1(int cycles) { return cycles < 30; }
-bool is_l2(int cycles) { return !is_l1(cycles); }
-
 void spin(int cycles) {
     // TODO: replace with blocking I/O
     for (int i = 0; i < cycles; i++) _mm_pause();
-}
-
-// IN UR FACE DCU-IP PREFETCHER!!!
-static inline int rand_line_offset() {
-    return rand() % (LINE_SIZE - 1);
 }
 
 // buf must be  aligned to SET_STRIDE
@@ -42,12 +31,14 @@ bool is_attacked(volatile uint8_t* buf, int set) {
 mask_t which_attacked(volatile uint8_t* buf) {
     int misses[L1_SETS] = {0};
     for (int j = 0; j < L1_SETS; j++) {
+        register int m = 0;
         for (int i = 0; i < 50; i++) {
             buf[j * LINE_SIZE + rand_line_offset()] = 0;
             spin(500);
             CYCLES t = measure_one_block_access_time((uint64_t)(&buf[j * LINE_SIZE + rand_line_offset()]));
-            if (is_l2(t)) misses[j]++;
+            if (is_l2(t)) m++;
         }
+        misses[j] = m;
     }
 
     #ifdef DEBUG
