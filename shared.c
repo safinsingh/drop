@@ -1,11 +1,14 @@
 #include <immintrin.h>
+#include <popcntintrin.h>
 #include <stdbool.h>
 #include "util.h"
 #include "shared.h"
+#include <syscall.h>
+#include <unistd.h>
 
-// hand-tuned constants; ~accurate when other thread is busy-priming set
-#define BURST_REPETITIONS 4000
-#define BURST_SLEEP 4000
+// each function contains hand-tuned constants; ~accurate when other thread is busy-priming set
+// note that these constants must be tuned per-device. this was tested on:
+// asus ux430unr, i7-8550u, plugged in
 
 // Rough (observed) latencies:
 // L1: ~20 (0-30)
@@ -13,81 +16,99 @@
 bool is_l1(int cycles) { return cycles < 30; }
 bool is_l2(int cycles) { return !is_l1(cycles); }
 
-void sleep(int cycles) {
-    for (int i = 0; i < cycles; i++);
+void spin(int cycles) {
+    // TODO: replace with blocking I/O
+    for (int i = 0; i < cycles; i++) _mm_pause();
+}
+
+// IN UR FACE DCU-IP PREFETCHER!!!
+static inline int rand_line_offset() {
+    return rand() % (LINE_SIZE - 1);
 }
 
 // buf must be  aligned to SET_STRIDE
 //              of a size === 0 (mod SET_STRIDE)
-bool set_is_attacked(volatile uint8_t* buf, int set) {
-    int hits = 0;
-    for (int i = 0; i < BURST_REPETITIONS; i++) {
-        buf[set * LINE_SIZE] = 0;
-        sleep(BURST_SLEEP);
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[set * LINE_SIZE]));
-        if (is_l2(t)) hits++;
+bool is_attacked(volatile uint8_t* buf, int set) {
+    int misses = 0;
+    for (int i = 0; i < 50; i++) {
+        buf[set * LINE_SIZE + rand_line_offset()] = 0;
+        spin(400); // ~ 1/popcount(attack bits!) we go with worst-case.
+        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[set * LINE_SIZE + rand_line_offset()]));
+        if (is_l2(t)) misses++;
     }
-    return hits > BURST_REPETITIONS / 2;
+    return misses > 30;
 }
 
-// fused to check two sets at once
-// set1->MSB, set2->LSB
-int set_is_attacked2(volatile uint8_t* buf, int set1, int set2) {
-    int h1 = 0, h2 = 0;
-    for (int i = 0; i < BURST_REPETITIONS; i++) {
-        buf[set1 * LINE_SIZE] = 0;
-        buf[set2 * LINE_SIZE] = 0;
-        sleep(BURST_SLEEP);
-        CYCLES t1 = measure_one_block_access_time((uint64_t)(&buf[set1 * LINE_SIZE]));
-        CYCLES t2 = measure_one_block_access_time((uint64_t)(&buf[set2 * LINE_SIZE]));
-        if (is_l2(t1)) h1++;
-        if (is_l2(t2)) h2++;
+mask_t which_attacked(volatile uint8_t* buf) {
+    int misses[L1_SETS] = {0};
+    for (int j = 0; j < L1_SETS; j++) {
+        for (int i = 0; i < 50; i++) {
+            buf[j * LINE_SIZE + rand_line_offset()] = 0;
+            spin(500);
+            CYCLES t = measure_one_block_access_time((uint64_t)(&buf[j * LINE_SIZE + rand_line_offset()]));
+            if (is_l2(t)) misses[j]++;
+        }
     }
-    int r1 = h1 > BURST_REPETITIONS / 2;
-    int r2 = h2 > BURST_REPETITIONS / 2;
-    return (r1 << 1) | r2;
-}
 
-// buf must be  aligned to SET_STRIDE
-//              of size SET_STRIDE * NUM_EVICTORS
-void set_attack(volatile uint8_t* buf, int set) {
-    for (int j = 1; j < NUM_EVICTORS; j++) {
-        buf[set * LINE_SIZE + j * SET_STRIDE] = 0;
+    #ifdef DEBUG
+    uint64_t avg_attacked_misses = 0;
+    uint64_t avg_relaxed_misses  = 0;
+    uint8_t popcnt = _mm_popcnt_u64(TEST_CONST);
+    for (int i = 0; i < L1_SETS; i++) {
+        if (TEST_BIT(TEST_CONST, i)) avg_attacked_misses += misses[i];
+        else avg_relaxed_misses += misses[i];
     }
+    avg_attacked_misses /= popcnt; avg_relaxed_misses /= (64 - popcnt);
+    printf("avg attacked #misses: %lu\n", avg_attacked_misses);
+    printf("avg passive  #misses: %lu\n", avg_relaxed_misses);
+    #endif
+    
+    uint64_t ret = 0;
+    for (int i = 0; i < L1_SETS; i++) {
+        uint64_t cond = misses[i] > 35;
+
+        // missed thresh
+        #ifdef DEBUG
+        if (cond ^ TEST_BIT(TEST_CONST, i)) printf("misses[%d] = %d\n", i, misses[i]);
+        #endif
+
+        ret |= cond << i;
+    }
+    return ret;
 }
 
 // fused probe/attack to sustain pressure
-bool set_attack_and_probe(volatile uint8_t* buf, int attack_set, int probe_set) {
-    int hits = 0;
-    for (int i = 0; i < BURST_REPETITIONS; i++) {
-        buf[probe_set * LINE_SIZE] = 0;
-        set_attack(buf, attack_set);
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[probe_set * LINE_SIZE]));
-        if (is_l2(t)) hits++;
+bool attack_and_probe(volatile uint8_t* buf, mask_t attack_sets, int probe_set) {
+    int num_attacked = _mm_popcnt_u64(attack_sets);
+    int evictors = 4000 / num_attacked; // per set, per round
+    int misses = 0;
+
+    for (int i = 0; i < 50; i++) {
+        buf[probe_set * LINE_SIZE + rand_line_offset()] = 0;
+
+        for (int j = 0; j < evictors; j++) {
+            for (int k = 0; k < 64; k++) {
+                if ((attack_sets >> k) & 0b1) {
+                    // only touch lines in the [1, NUM_EVICTORS] * SET_STRIDE range
+                    int index = (i * evictors + j) % (NUM_EVICTORS - 1) + 1;
+                    buf[k * LINE_SIZE + index * SET_STRIDE] = 0;
+                }
+            }
+        }
+        
+        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[probe_set * LINE_SIZE + rand_line_offset()]));
+        if (is_l2(t)) misses++;
     }
-    return hits > BURST_REPETITIONS / 2;
+    return misses > 30;
 }
 
-bool set_attack_and_probe2(volatile uint8_t* buf, int attack_set1, int attack_set2, int probe_set) {
-    int hits = 0;
-    for (int i = 0; i < BURST_REPETITIONS; i++) {
-        buf[probe_set * LINE_SIZE] = 0;
-        set_attack(buf, attack_set1);
-        set_attack(buf, attack_set2);
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[probe_set * LINE_SIZE]));
-        if (is_l2(t)) hits++;
+void print_binary64(uint64_t n) {
+    for (int i = 63; i >= 0; i--) {
+        uint64_t mask = (uint64_t)1 << i;
+        if (n & mask) {
+            putchar('1');
+        } else {
+            putchar('0');
+        }
     }
-    return hits > BURST_REPETITIONS / 2;
-}
-
-int get_nth_bit(char* buf, int n) {
-    int byte = n / 8;
-    int bit = n - (byte * 8);
-    return (buf[byte] >> bit) & 0b1;
-}
-
-void set_nth_bit(char* buf, int n, int value) {
-    int byte = n / 8;
-    int bit = n - (byte * 8);
-    buf[byte] |= value << bit;
 }

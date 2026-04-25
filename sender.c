@@ -1,52 +1,30 @@
+#include <immintrin.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "util.h"
 #include "shared.h"
 
-typedef enum {
-    STATE_INPUT,
-    STATE_REQ_HI,
-    STATE_REQ_LO
-} sender_state_t;
-
 static volatile uint8_t buf[SET_STRIDE * NUM_EVICTORS] __attribute__((aligned(SET_STRIDE)));
-
-static char message_buf[512] = {0};
+static uint8_t msg[MSG_LEN] = {0};
 
 int main() {
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    sender_state_t state = STATE_INPUT;
-
-    int bit;
-    int index = 0;
-    int len;
-
-    debug_print("INPUT");
-
     for (;;) {
-        switch (state) {
-            case STATE_INPUT:
-                printf("> ");
-                fgets(message_buf, sizeof(message_buf), stdin);
-                // send null-terminator
-                index = 0; len = (strlen(message_buf) + 1) * 8;
-                state = STATE_REQ_HI; debug_print("INPUT->REQ_HI");
-                break;
+        printf("> ");
+        fgets((char*)msg, sizeof(msg), stdin);
+        int len = strlen((char*)msg) + 1; // send null-terminator
 
-            case STATE_REQ_HI:
-                bit = get_nth_bit(message_buf, index) ? DATA_1 : DATA_0;
-                if (set_attack_and_probe2(buf, REQ, bit, ACK)) { debug_print("REQ_HI->REQ_LO"); state = STATE_REQ_LO; }
-                break;
-
-            case STATE_REQ_LO:
-                if (!set_is_attacked(buf, ACK)) {
-                    if (++index == len) {
-                        state = STATE_INPUT; debug_print("REQ_LO->INPUT");
-                        printf("sent: %s", message_buf);
-                    }
-                    else { state = STATE_REQ_HI; debug_print("REQ_LO->REQ_HI"); }
-                }
-                break;
+        clock_t begin = clock();
+        for (int i = 0; i < len; i += BYTES_PER_PACKET) {
+            uint64_t data = *((uint64_t*)(msg + i)) & DATA_MASK;
+            while (!attack_and_probe(buf, (data << 2) | BIT(REQ), ACK));
+            spin(100); // receiver must see that REQ has been deasserted
+            while (is_attacked(buf, ACK)); // wait for receiver to drop ACK
         }
+        clock_t end = clock();
+        double time = (double)(end - begin) / CLOCKS_PER_SEC;
+        double thpt = (double)len / time;
+
+        printf("wrote %d bytes in %.3lf sec (%.3lf bytes/sec)\n", len, time, thpt);
     }
 }
