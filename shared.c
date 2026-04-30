@@ -19,9 +19,9 @@ void spin(int cycles) {
 bool is_attacked(volatile uint8_t* buf, int set) {
     register int misses = 0;
     for (int i = 0; i < 50; i++) {
-        buf[set * LINE_SIZE + rand_line_offset()] = 0;
+        buf[set_index(set)] = 0;
         spin(400); // ~ 1/popcount(attack bits!) we go with worst-case.
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[set * LINE_SIZE + rand_line_offset()]));
+        CYCLES t = set_access_time(buf, set);
         if (is_l2(t)) misses++;
     }
     uint64_t cond = misses >= 30;
@@ -33,15 +33,15 @@ bool is_attacked(volatile uint8_t* buf, int set) {
 
 mask_t which_attacked(volatile uint8_t* buf) {
     int misses[L1_SETS] = {0};
-    for (int j = 0; j < L1_SETS; j++) {
+    for (int i = WHICH_MIN; i < WHICH_MAX; i++) {
         register int m = 0;
-        for (int i = 0; i < 15; i++) {
-            buf[j * LINE_SIZE + rand_line_offset()] = 0;
+        for (int j = 0; j < 15; j++) {
+            buf[set_index(i)] = 0;
             spin(100);
-            CYCLES t = measure_one_block_access_time((uint64_t)(&buf[j * LINE_SIZE + rand_line_offset()]));
+            CYCLES t = set_access_time(buf, i);
             if (is_l2(t)) m++;
         }
-        misses[j] = m;
+        misses[i] = m;
     }
 
     #ifdef DEBUG
@@ -49,7 +49,7 @@ mask_t which_attacked(volatile uint8_t* buf) {
     uint64_t avg_relaxed_misses  = 0;
     mask_t packet = DATA_PACKET(TEST_CONST2);
     uint8_t popcnt = _mm_popcnt_u64(packet);
-    for (int i = 0; i < L1_SETS; i++) {
+    for (int i = WHICH_MIN; i < WHICH_MAX; i++) {
         if (TEST_BIT(packet, i)) avg_attacked_misses += misses[i];
         else avg_relaxed_misses += misses[i];
     }
@@ -57,19 +57,35 @@ mask_t which_attacked(volatile uint8_t* buf) {
     uint32_t needs_print = 0;
     #endif
 
+    #ifdef DEBUG
+    struct { int i, misses; uint64_t expected, got; } mismatches[L1_SETS];
+    int n_mismatch = 0;
+    #endif
+
     uint64_t ret = 0;
-    for (int i = 0; i < L1_SETS; i++) {
-        uint64_t cond = misses[i] >= 10;
-
-        // missed thresh
-        #ifdef DEBUG
-        if (cond ^ TEST_BIT(packet, i)) { printf("misses[%d] = %d\n", i, misses[i]); needs_print = true; }
-        #endif
-
+    for (int i = WHICH_MIN; i < WHICH_MAX; i++) {
+        uint64_t cond = misses[i] >= 9;
         ret |= cond << i;
+
+        #ifdef DEBUG
+        if (cond ^ TEST_BIT(packet, i)) {
+            mismatches[n_mismatch].i = i;
+            mismatches[n_mismatch].misses = misses[i];
+            mismatches[n_mismatch].expected = TEST_BIT(packet, i);
+            mismatches[n_mismatch].got = cond;
+            n_mismatch++;
+            needs_print = true;
+        }
+        #endif
     }
+
     #ifdef DEBUG
     if (needs_print) {
+        for (int x = 0; x < n_mismatch; x++) {
+            printf("misses[%d] = %d (expected %lu, got %lu)\n",
+                   mismatches[x].i, mismatches[x].misses,
+                   mismatches[x].expected, mismatches[x].got);
+        }
         printf("avg attacked #misses: %lu\n", avg_attacked_misses);
         printf("avg passive  #misses: %lu\n", avg_relaxed_misses);
     }
@@ -81,25 +97,25 @@ mask_t which_attacked(volatile uint8_t* buf) {
 // fused probe/attack to sustain pressure
 bool attack_and_probe(volatile uint8_t* buf, mask_t attack_sets, int probe_set) {
     int num_attacked = _mm_popcnt_u64(attack_sets);
-    int evictors = 4000 / num_attacked; // per set, per round
+    int evictors = 5500 / num_attacked; // per set, per round
     int misses = 0;
 
     for (int i = 0; i < 50; i++) {
-        buf[probe_set * LINE_SIZE + rand_line_offset()] = 0;
+        buf[set_index(probe_set)] = 0;
 
         for (int j = 0; j < evictors; j++) {
-            for (int k = 0; k < 64; k++) {
-                if ((attack_sets >> k) & 0b1) {
-                    // only touch lines in the [1, NUM_EVICTORS] * SET_STRIDE range
-                    int index = (i * evictors + j) % (NUM_EVICTORS - 1) + 1;
-                    buf[k * LINE_SIZE + index * SET_STRIDE] = 0;
-                }
+            int evictor = (i * evictors + j) & (NUM_EVICTORS - 1);
+
+            for (uint64_t m = attack_sets; m > 0; m &= m - 1) {
+                int k = __builtin_ctzll(m);
+                buf[set_index_no_offset(k) + evictor * SET_STRIDE] = 0;
             }
         }
-        
-        CYCLES t = measure_one_block_access_time((uint64_t)(&buf[probe_set * LINE_SIZE + rand_line_offset()]));
+
+        CYCLES t = set_access_time(buf, probe_set);
         if (is_l2(t)) misses++;
     }
+
     return misses > 30;
 }
 
