@@ -1,8 +1,18 @@
+set -euo pipefail
+
 CC="gcc"
 CFLAGS="-O2 -march=native"
-SHARED_SRC="shared.c"
-CORE=3
+DELAY=300000000 # 300M cycles; ~135ms
 
-if [ $1 == "send" ]; then CORE=$((CORE+4)); fi
+$CC $CFLAGS send.c -o send
+$CC $CFLAGS recv.c -o recv
+$CC $CFLAGS tsc.c -o tsc
 
-$CC $CFLAGS $SHARED_SRC "$1.c" -o $1 && taskset -c $CORE ./$1
+read -r -p "> " MSG
+
+NOW=$(taskset -c 3 ./tsc)
+START=$(( (NOW + DELAY + 2047) & ~2047 ))
+
+taskset -c 3 ./recv $START &
+printf '%s\n' "$MSG" | taskset -c 7 ./send $START &
+wait

@@ -7,21 +7,37 @@
 #define LINE_SIZE 64
 #define NUM_SETS 64
 
-#define EVICTORS 16
+#define EVICTORS 9
 #define ATTACK_BUF_SIZE (SET_STRIDE * EVICTORS)
 #define PAGE_SIZE 4096
 #define ATTACK_BUF_PAGES (ATTACK_BUF_SIZE / PAGE_SIZE)
 
 #define CHASE_LENGTH 8
-#define CHASE_CANDIDATES 16
-#define VICTIM_BUF_SIZE (SET_STRIDE * CHASE_CANDIDATES)
+#define VICTIM_BUF_SIZE (SET_STRIDE * CHASE_LENGTH)
 
-#define L1_THRESHOLD 180
-#define MISS_THRESHOLD 5
+// fgets-style framed message: fixed-size byte buffer
+#define MSG_BYTES 16
+#define MSG_BITS (MSG_BYTES * 8)
+#define MSG_SLOTS MSG_BITS
 
+// 2048-cycle interval
+#define INTERVAL_BITS 11
+// f(interval)
+#define L1_THRESHOLD 70
+#define MISS_THRESHOLD 2
 
 // set 0=used, 1-63=unused. used for prefaulting.
 #define SAFE_SET 1
 
-uint32_t rdtsc_lo();
-uint32_t rdtscp_lo();
+static inline uint32_t rdtsc_lo() {
+    uint32_t lo;
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo) : : "edx");
+    return lo;
+}
+
+// performs load serialization. slight cycle count improvement over lfence + rdtsc.
+static inline uint32_t rdtscp_lo() {
+    uint32_t lo;
+    __asm__ __volatile__ ("rdtscp" : "=a" (lo) : : "edx", "ecx");
+    return lo;
+}
