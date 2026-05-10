@@ -1,76 +1,118 @@
-#include "shared.h"
+#include "proto.h"
 #include <immintrin.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
-int main(int argc, char**argv) {
-    uint64_t start_tsc = strtoull(argv[1], 0, 10);
+#ifdef TRACE
+#define TRACEF(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define TRACEF(...) ((void)0)
+#endif
+
+typedef struct {
+    // Current pointer-chase node for the hot prime+probe measurement loop.
+    volatile uintptr_t *head;
+    // Last observed 2048-cycle interval index.
+    uint64_t prev_interval;
+    // Number of slow pointer chases accumulated in the current interval.
+    uint32_t misses;
+} capture_t;
+
+static void capture_until(volatile uint8_t *raw, uint32_t *pos, uint32_t target,
+                          capture_t *cap)
+{
+    while (*pos < target) {
+        uint32_t start = rdtsc_lo();
+#pragma GCC unroll 8
+        for (uint32_t i = 0; i < CHASE_LENGTH; i++)
+            cap->head = (volatile uintptr_t *)*cap->head;
+        uint64_t end = rdtscp();
+
+        uint32_t lat = (uint32_t)end - start;
+        if (lat >= L1_THRESHOLD && lat < INTERVAL_CYCLES)
+            cap->misses++;
+
+        uint64_t ci = end >> INTERVAL_BITS;
+        if (ci > cap->prev_interval) {
+            raw[raw_offset((*pos)++)] = cap->misses > 255u ? 255u : (uint8_t)cap->misses;
+            cap->misses = 0;
+
+            uint64_t skipped = ci - cap->prev_interval - 1u;
+            while (skipped-- && *pos < target)
+                raw[raw_offset((*pos)++)] = 0;
+            cap->prev_interval = ci;
+        }
+    }
+}
+
+int main(void)
+{
+    static volatile uint8_t raw[RAW_STORE_SIZE] __attribute__((__aligned__(SET_STRIDE)));
+    static uint8_t out[MSG_BYTES];
 
     mlockall(MCL_CURRENT | MCL_FUTURE);
 
-    volatile uintptr_t victim_buf[VICTIM_BUF_SIZE / sizeof(uintptr_t)] __attribute__((__aligned__(SET_STRIDE)));
-    unsigned aux;
+    for (uint32_t page = 0; page < RAW_PAGES; page++)
+        raw[page * PAGE_SIZE + SAFE_SET * LINE_SIZE] = 0;
 
+    volatile uintptr_t victim_buf[VICTIM_BUF_SIZE / sizeof(uintptr_t)] __attribute__((__aligned__(SET_STRIDE)));
     size_t stride = SET_STRIDE / sizeof(uintptr_t);
-    for (int i = 0; i < CHASE_LENGTH; i++)
-        victim_buf[i * stride] = (uintptr_t)&victim_buf[((i + 1) % CHASE_LENGTH) * stride];
+    for (uint32_t i = 0; i < CHASE_LENGTH; i++)
+        victim_buf[i * stride] = (uintptr_t)&victim_buf[((i + 1u) % CHASE_LENGTH) * stride];
     _mm_mfence();
 
-    volatile uintptr_t* head = &victim_buf[0];
+    capture_t cap = {
+        .head = &victim_buf[0],
+        .prev_interval = __rdtsc() >> INTERVAL_BITS,
+        .misses = 0,
+    };
+    uint32_t pos = 0;
+    capture_until(raw, &pos, ACQUIRE_SLOTS, &cap);
 
-    // chase iv -2 to land chain in L1, idle iv -1 (sender seeds there)
-    while (__rdtsc() < start_tsc - (2ULL << INTERVAL_BITS));
-    uint64_t boundary = start_tsc - (1ULL << INTERVAL_BITS);
-    uint64_t now;
-    do {
-#pragma GCC unroll 8
-        for (int i = 0; i < CHASE_LENGTH; i++) head = (volatile uintptr_t*)*head;
-        now = __rdtscp(&aux);
-    } while (now < boundary);
-    while (__rdtsc() < start_tsc);
-
-    uint8_t slots[MSG_SLOTS];
-    for (uint32_t i = 0; i < MSG_SLOTS; i++) slots[i] = 0;
-
-    uint64_t start_interval = start_tsc >> INTERVAL_BITS;
-    uint64_t prev_interval = __rdtsc() >> INTERVAL_BITS;
-    uint32_t misses = 0;
-    uint32_t pos = (uint32_t)(prev_interval - start_interval);
-    if (pos > MSG_SLOTS) pos = MSG_SLOTS;
-    while (pos < MSG_SLOTS) {
-        uint32_t start = rdtsc_lo();
-#pragma GCC unroll 8
-        for (int i = 0; i < CHASE_LENGTH; i++) head = (volatile uintptr_t*)*head;
-        uint64_t end = __rdtscp(&aux);
-        uint32_t lat = (uint32_t)end - start;
-        if (lat >= L1_THRESHOLD) misses++;
-        uint64_t ci = end >> INTERVAL_BITS;
-        if (ci > prev_interval) {
-            slots[pos++] = misses >= MISS_THRESHOLD;
-            misses = 0;
-            // catch up if interrupt skipped intervals
-            uint64_t skip = ci - prev_interval - 1;
-            for (uint64_t k = 0; k < skip && pos < MSG_SLOTS; k++) slots[pos++] = 0;
-            prev_interval = ci;
-        }
+    uint64_t scan_start = __rdtsc();
+    proto_decode_state_t state;
+    if (proto_collect_headers(raw, &state) == 0) {
+        uint64_t scan_end = __rdtsc();
+        TRACEF("recv candidates=%u best=%lld header=0 scan_slots=%llu\n",
+               state.candidate_count, (long long)state.best_score,
+               (unsigned long long)((scan_end - scan_start) >> INTERVAL_BITS));
+        return 2;
     }
 
-    uint8_t out[MSG_BYTES];
-    for (uint32_t b = 0; b < MSG_BYTES; b++) {
-        uint8_t byte = 0;
-        for (uint32_t k = 0; k < 8; k++)
-            if (slots[b * 8 + k]) byte |= (1u << k);
-        out[b] = byte;
+    uint64_t scan_end = __rdtsc();
+    int32_t guard_slack = (int32_t)state.min_sync_base - (int32_t)pos -
+                          (int32_t)((scan_end - scan_start) >> INTERVAL_BITS);
+    if (guard_slack < 0) {
+        TRACEF("recv candidates=%u headers=%u best=%lld guard_slack=%d\n",
+               state.candidate_count, state.header_count,
+               (long long)state.best_score, guard_slack);
+        return 2;
     }
-    printf("msg: ");
-    for (int i = 0; i < MSG_BYTES; i++) {
-        uint8_t c = out[i];
-        if (c >= 0x20 && c < 0x7f) putchar(c);
-        else if (c == 0) putchar('.');
-        else printf("\\x%02x", c);
-    }
-    putchar('\n');
+    capture_until(raw, &pos, state.max_sync_end, &cap);
+    proto_choose_payload(raw, &state);
+
+    uint32_t target = proto_payload_target(&state);
+    if (target > MAX_CAPTURE_SLOTS)
+        return 2;
+    capture_until(raw, &pos, target, &cap);
+
+    proto_decode_payload(raw, &state, out);
+#ifdef TRACE
+    TRACEF("recv off=%u candidates=%u headers=%u best=%lld sync=%lld len=%u scan_slots=%llu guard_slack=%d\n",
+           state.frame_off, state.candidate_count, state.header_count,
+           (long long)state.best_score, (long long)state.best_sync, state.len,
+           (unsigned long long)((scan_end - scan_start) >> INTERVAL_BITS),
+           guard_slack);
+#else
+    (void)state;
+    (void)scan_start;
+    (void)scan_end;
+    (void)guard_slack;
+#endif
+
+    if (write(1, out, state.len) < 0)
+        return 1;
+    return 0;
 }
