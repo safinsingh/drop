@@ -1,4 +1,4 @@
-# drop2
+# drop
 
 Blazing-fast SMT-based L1 prime+probe covert channel achieving 1 Mbps throughput and <0.3% BER.
 
